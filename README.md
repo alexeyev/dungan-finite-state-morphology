@@ -49,6 +49,8 @@ Makefile                   builds dng-gan.* and dng-shaanxi.*
 
 Requires HFST (`hfst-lexc`, `hfst-twolc`, `hfst-compose-intersect`, …).
 
+Python 3.9+. The CI gates need only the standard library; the held-out PDF experiments (`make heldout`, `holdout-ablation`, and the three-register `profile`/`typology` tables) additionally need PyMuPDF — `pip install -r requirements-dev.txt`.
+
 ```sh
 make            # build both dialects (analyser + generator, optimised lookup)
 make gan        # Gansu only
@@ -201,8 +203,9 @@ Per-rule, page-level provenance is given in the accompanying article (under revi
   leading "9", ў → "7", ә → "H" in web-fetched text). A local copy of the PDF
   decodes differently — the special letters appear as named markers
   (ХcyrZhedesc → Җ, Хcyrstraight3 → Ү, Хcyrinv → ә, etc.) and tones as roman
-  numerals joined by hyphens — and `pypdf` then allows extracting any page
-  range. The entire Cyrillic alphabet (А–Я) has now been processed from the dictionary
+  numerals joined by hyphens — and `pypdf` (an off-repo tooling step) then allows extracting any page
+  range. The in-tree PDF readers instead use PyMuPDF (`import fitz`), the one Python
+  dependency in `requirements-dev.txt`. The entire Cyrillic alphabet (А–Я) has now been processed from the dictionary
   (6,987 stems), each carrying its headword tone where the source attests one.
 - **Coverage corpus**: the Dungan Wikipedia (Wikimedia Incubator `Wp/dng`), the
   Dungan Association of Kyrgyzstan literature portal, and trilingual
