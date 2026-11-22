@@ -32,12 +32,19 @@ lexicon build.
 
 Requirements (optional dependency, not added to requirements*.txt):
     python -m pip install --target pylibs stanza
-    # torch is pulled in with it; the Russian model (~50 MB) is downloaded on
-    # first use into pylibs/stanza_resources (or $DUNGA_STANZA_RESOURCES).
+    # torch comes with it. The Russian model (default.zip, ~630 MB, mostly the
+    # conll17 pretrain matrix) lands in pylibs/stanza_resources on first use, or
+    # wherever $DUNGA_STANZA_RESOURCES points.
+    #
+    # Two version snags are handled below, in _torch_load_compat() and _parse():
+    # torch >= 2.6 refuses stanza 1.9's pickle protocol, and stanza's tokenizer
+    # mangles very short texts when they are batched. Read those two functions
+    # before filing a bug against this file.
 
 Cost, for the decision: the suffix rule runs over 10k glosses in well under a
-second; stanza adds torch to the environment, downloads a model once, and takes
-on the order of a minute for the same 10k glosses on CPU.
+second and holds nothing in memory. This needs ~800 MB resident once the model
+is loaded, ~17 ms per gloss on CPU (measured: 3217 Yanshansin glosses in about a
+minute), and a one-time 630 MB download.
 
 Conventions worth knowing before reading the code:
   * `classify()` returns the same small tag vocabulary as the shipped module
@@ -63,7 +70,8 @@ import sys
 from pathlib import Path
 
 MODEL_LANG = "ru"
-PROCESSORS = "tokenize,pos,depparse"
+# depparse declares lemma as a prerequisite in stanza >= 1.9, hence the four.
+PROCESSORS = "tokenize,pos,lemma,depparse"
 
 # ---------------------------------------------------------------- bootstrap --
 
@@ -104,13 +112,34 @@ def _resources_dir():
 
 def _model_present(d):
     ru = Path(d) / MODEL_LANG
-    return all((ru / p).is_dir() for p in ("tokenize", "pos", "depparse"))
+    return all((ru / p).is_dir() for p in ("tokenize", "pos", "lemma", "depparse"))
+
+
+def _torch_load_compat():
+    """stanza 1.9 pickles its pretrain matrix in pickle protocol 3, which
+    torch >= 2.6 refuses under the new weights_only=True default, so the POS
+    model fails to load ('Unsupported operand 67'). Load these local, trusted
+    model files the pre-2.6 way."""
+    import inspect
+    try:
+        import torch
+    except ImportError:
+        return
+    plain = torch.load
+    if not hasattr(plain, "_dunga_weights_only") and \
+       "weights_only" in inspect.signature(plain).parameters:
+        def torch_load(*args, **kwargs):
+            kwargs.setdefault("weights_only", False)
+            return plain(*args, **kwargs)
+
+        torch_load._dunga_weights_only = True
+        torch.load = torch_load
 
 
 _NLP = None
 
 
-def get_pipeline(download=True):
+def get_pipeline(download=False):
     """Build (once) the Russian stanza pipeline. Raises SystemExit with a hint."""
     global _NLP
     if _NLP is not None:
@@ -121,14 +150,27 @@ def get_pipeline(download=True):
             "  python -m pip install --target pylibs stanza\n"
             "then re-run; the directory is found automatically (or set DUNGA_PYLIBS).")
     import stanza
+    _torch_load_compat()
     res = _resources_dir()
     if not _model_present(res):
         if not download:
             raise SystemExit(f"no Russian model in {res}; run once with --download")
         res.mkdir(parents=True, exist_ok=True)
-        stanza.download(MODEL_LANG, dir=str(res), processors=PROCESSORS, verbose=False)
+        try:
+            stanza.download(MODEL_LANG, dir=str(res), processors=PROCESSORS, verbose=False)
+        except Exception as exc:  # offline, or a proxy that breaks requests
+            raise SystemExit(
+                f"model download failed ({exc.__class__.__name__}: {exc}).\n"
+                "Fetch these two by hand and unpack them:\n"
+                "  https://raw.githubusercontent.com/stanfordnlp/stanza-resources"
+                "/main/resources_1.9.0.json  ->  " f"{res / 'resources.json'}\n"
+                "  https://huggingface.co/stanfordnlp/stanza-ru/resolve/v1.9.0"
+                "/models/default.zip  ->  " f"{res / MODEL_LANG / 'default.zip'}\n"
+                "(default.zip unpacks into that ru/ directory; it is ~630 MB, most "
+                "of it the conll17 pretrain matrix)")
     _NLP = stanza.Pipeline(MODEL_LANG, processors=PROCESSORS, dir=str(res),
-                           download_method=None, verbose=False, use_gpu=False)
+                           download_method=None, verbose=False, use_gpu=False,
+                           tokenize_pretokenized=True, tokenize_no_ssplit=True)
     return _NLP
 
 
@@ -145,11 +187,11 @@ _LEXC = {
 _MINIMAL = {
     "N-NN": "n", "N-AN": "n", "Np": "np", "Adj": "adj", "AdjDeg": "adj",
     "V": "vblex", "Adv": "adv", "Num": "num", "Prn": "prn", "Post": "post",
-    "CnjCoo": "cnj", "CnjSub": "cnj", "Part": "part", "Ij": "ij", "Loc": "loc",
+    "CnjCoo": "cnj", "CnjSub": "cnj", "Part": "part", "Ij": "ij",
 }
 
 # For the A/B against the suffix rule, whose whole vocabulary is n/adj/vblex/adv.
-_COARSE = {"np": "n", "loc": "adv"}
+_COARSE = {"np": "n"}
 
 # Where an unparsed gloss has to fall back, the suffix rule's four classes have
 # to be spelled in lexc terms again.
@@ -162,6 +204,10 @@ PARTICIPLE_TAG = "Adj"
 
 _SKIP_UPOS = {"PUNCT", "SYM", "X"}
 _CLIMB_UPOS = {"AUX", "PART", "CCONJ", "SCONJ"}  # function words with content children
+
+# Glosses parsed per pipeline call. Bigger is faster; the ceiling here keeps the
+# joined text short enough that a gloss never straddles a tokenizer batch.
+_CHUNK = 128
 
 # ------------------------------------------------------------------ input ----
 
@@ -191,6 +237,16 @@ def _senses(gloss):
             continue
         out.append(chunk)
     return out
+
+
+# Our own tokenizer: the pipeline runs pretokenized, so this decides what stanza
+# sees. Words keep internal hyphens ("почему-то"); punctuation and digits become
+# their own tokens.
+_TOKEN = re.compile(r"\d+|[^\W\d_]+(?:-[^\W\d_]+)*|[^\s\w]")
+
+
+def _pretokenized(text):
+    return " ".join(_TOKEN.findall(text)) or "—"
 
 
 # ------------------------------------------------------------------ parse ----
@@ -262,14 +318,30 @@ class Decision:
 
 
 def _parse(texts):
+    """Parse many short texts, one stanza call per chunk.
+
+    Deliberately not `pipeline.bulk_process()`: stanza 1.9's tokenizer
+    reconstructs each document's tokens from character offsets in a text where
+    the documents were joined by blank lines, and for texts this short that
+    offsets calculation slips -- `["он", "в течение"]` comes back as 'о'+'н' and
+    'течени'+'е'. Pretokenizing ourselves (glosses are already word lists) and
+    parsing one joined document skips that code path entirely, and is ~9x faster
+    than one call per gloss (17 ms vs 130 ms on this CPU): the cost is model
+    startup, not the individual sentence.
+    """
     nlp = get_pipeline()
-    if hasattr(nlp, "bulk_process"):
-        docs = nlp.bulk_process(texts)
-    else:  # older stanza
-        docs = [nlp(t) for t in texts]
     heads = []
-    for doc in docs:
-        heads.append(_head_of(doc.sentences[0]) if doc.sentences else None)
+    for start in range(0, len(texts), _CHUNK):
+        chunk = texts[start:start + _CHUNK]
+        doc = nlp("\n\n".join(_pretokenized(t) for t in chunk))
+        if len(doc.sentences) == len(chunk):  # the normal case
+            heads.extend(_head_of(s) for s in doc.sentences)
+            continue
+        # Blank-line sentence splitting did not line up (an empty or odd text):
+        # fall back to one call per gloss so nothing gets misfiled.
+        for text in chunk:
+            one = nlp(_pretokenized(text))
+            heads.append(_head_of(one.sentences[0]) if one.sentences else None)
     return heads
 
 
