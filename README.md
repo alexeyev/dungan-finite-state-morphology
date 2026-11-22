@@ -76,6 +76,9 @@ them exactly):
 make ablation         # word-list ablation
 make profile          # morphological profile across the three registers
 make typology         # typology of recognition failures (A/B/C/D)
+make sensitivity      # profile under both counting rules, per-10k productivity,
+                      #   rank agreement under both rules, bootstrap intervals
+make precision-errors # what the readings counted as wrong actually are
 make subject-overlap  # religious-subject share of the development corpus
 make heldout          # coverage on the held-out texts
 make holdout-ablation # rebuild without the corpus-mined stems and re-measure
@@ -189,6 +192,11 @@ Per-rule, page-level provenance is given in the accompanying article (under revi
   Zavjalova 1978); and Olli Salmi, *The Syntax of Central Asian Dungan*
   (draft, Oslo Digital Archive of Dungan Studies) — aspect system, localizers,
   precise Gansu/Shaanxi correspondences (e.g. Shaanxi 1pl ңай, classifier гуә).
+> **Tag caveat.** `<pst>` and `<fut>` are engineering labels for aspectual
+> categories, not temporal ones: `-ли` marks perfective/demarcational aspect
+> and `-ни` marks prospective aspect (see the paper, Sections 4 and 5).
+> Downstream users should not read them as past and future tense.
+
 - **Lexicon**: hand-built core from corpus frequency; POS-tagged lemmas
   harvested from **en.wiktionary.org**; vocabulary attested in Salmi's grammar
   example sentences; and entries from **Yusup Yanshansin's Concise
